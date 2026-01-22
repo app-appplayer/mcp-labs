@@ -1,0 +1,18 @@
+# Dependencies
+.dart_tool/
+.packages
+pubspec.lock
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Build
+build/
+
+# OS
+.DS_Store
+
+# Docs - internal working documents (not for git)
+docs/
