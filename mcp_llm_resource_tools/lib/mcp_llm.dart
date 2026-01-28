@@ -14,6 +14,9 @@ export 'src/capabilities/capability_manager.dart';
 export 'src/lifecycle/lifecycle_manager.dart';
 export 'src/error/enhanced_error_handler.dart';
 
+// Deferred Loading Support
+export 'src/deferred/deferred_tool_manager.dart';
+
 // Core components
 export 'src/core/llm_interface.dart';
 export 'src/core/llm_client.dart';
@@ -140,6 +143,7 @@ class McpLlm {
   /// [routingProperties] - Optional properties for client routing
   /// [loadWeight] - Optional weight for load balancing
   /// [systemPrompt] - Optional system prompt for the LLM
+  /// [useDeferredLoading] - Enable deferred tool loading for token optimization (opt-in)
   Future<LlmClient> createClient({
     required String providerName,
     LlmConfiguration? config,
@@ -153,6 +157,7 @@ class McpLlm {
     Map<String, dynamic>? routingProperties,
     double loadWeight = 1.0,
     String? systemPrompt,
+    bool useDeferredLoading = false, // Opt-in deferred loading
   }) async {
     // Get provider factory
     final factory = _llmRegistry.getProviderFactory(providerName);
@@ -182,6 +187,7 @@ class McpLlm {
       pluginManager: effectivePluginManager,
       performanceMonitor: effectivePerformanceMonitor,
       retrievalManager: retrievalManager,
+      useDeferredLoading: useDeferredLoading, // Pass deferred loading config
     );
 
     // Add system prompt to the chat session if provided

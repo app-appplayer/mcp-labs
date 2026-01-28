@@ -25,6 +25,13 @@ class LlmClient {
   /// Enhanced error handler for 2025-03-26 error handling
   late final EnhancedErrorHandler? _errorHandler;
 
+  /// Deferred tool manager - created automatically when useDeferredLoading=true
+  /// Null when useDeferredLoading=false (no overhead for existing users)
+  DeferredToolManager? _deferredToolManager;
+
+  /// Whether deferred loading is enabled
+  final bool _useDeferredLoading;
+
   /// Storage manager
   final StorageManager? storageManager;
 
@@ -60,10 +67,12 @@ class LlmClient {
     bool enableLifecycleManagement = true, // Enable lifecycle management (2025-03-26)
     bool enableEnhancedErrorHandling = true, // Enable enhanced error handling (2025-03-26)
     bool enableDebugLogging = false, // Enable debug logging (2025-03-26)
+    bool useDeferredLoading = false, // Enable deferred tool loading (opt-in)
   })
       : _mcpClientManager = _initMcpClientManager(mcpClient, mcpClients),
         pluginManager = pluginManager ?? PluginManager(),
-        _performanceMonitor = performanceMonitor ?? PerformanceMonitor() {
+        _performanceMonitor = performanceMonitor ?? PerformanceMonitor(),
+        _useDeferredLoading = useDeferredLoading {
     
     // Initialize logging configuration (2025-03-26)
     if (enableDebugLogging) {
@@ -84,6 +93,12 @@ class LlmClient {
     _capabilityManager = enableCapabilityManagement ? _initCapabilityManager() : null;
     _lifecycleManager = enableLifecycleManagement ? _initLifecycleManager() : null;
     _errorHandler = enableEnhancedErrorHandling ? _initErrorHandler(errorConfig) : null;
+
+    // AUTO CONFIGURATION: Create DeferredToolManager if enabled
+    if (_useDeferredLoading) {
+      _deferredToolManager = DeferredToolManager();
+      _logger.info('Deferred tool loading enabled - token optimization active');
+    }
   }
 
   /// Initialize the MCP client manager
@@ -588,14 +603,30 @@ class LlmClient {
 
       // Handle tool calls if any
       if (response.toolCalls != null && response.toolCalls!.isNotEmpty) {
-        final toolResponse = await _handleToolCalls(
+        LlmResponse toolResponse;
+
+        // === DEFERRED LOADING PATH (NEW) ===
+        if (_useDeferredLoading && _deferredToolManager != null) {
+          toolResponse = await _handleDeferredToolCalls(
             response,
             userInput,
             enableTools,
             enablePlugins,
             parameters,
-            context
-        );
+            context,
+          );
+        }
+        // === EXISTING PATH (UNCHANGED) ===
+        else {
+          toolResponse = await _handleToolCalls(
+            response,
+            userInput,
+            enableTools,
+            enablePlugins,
+            parameters,
+            context,
+          );
+        }
 
         // Add only the follow-up response to chat session
         if (toolResponse.text.isNotEmpty) {
@@ -1032,6 +1063,126 @@ class LlmClient {
     return response;
   }
 
+  /// Handle tool calls with deferred loading
+  /// Validates arguments against cached schema and retries with full schema if needed
+  Future<LlmResponse> _handleDeferredToolCalls(
+    LlmResponse response,
+    String userInput,
+    bool enableTools,
+    bool enablePlugins,
+    Map<String, dynamic> parameters,
+    LlmContext? context,
+  ) async {
+    final toolCalls = response.toolCalls!;
+
+    for (final toolCall in toolCalls) {
+      final toolName = toolCall.name;
+
+      // Validate arguments against cached schema
+      final validationResult = _deferredToolManager!.validateToolCall(
+        toolName,
+        toolCall.arguments,
+      );
+
+      if (!validationResult.isValid) {
+        // LLM made incorrect call (missing/wrong params)
+        // Provide full schema and ask LLM to retry
+        _logger.info('Tool call validation failed for $toolName: ${validationResult.error}');
+        return await _retryWithFullSchema(
+          toolName: toolName,
+          originalResponse: response,
+          userInput: userInput,
+          parameters: parameters,
+          context: context,
+          validationError: validationResult.error,
+          enableTools: enableTools,
+          enablePlugins: enablePlugins,
+        );
+      }
+    }
+
+    // All tool calls are valid, execute them using existing method
+    return await _handleToolCalls(
+      response,
+      userInput,
+      enableTools,
+      enablePlugins,
+      parameters,
+      context,
+    );
+  }
+
+  /// Retry LLM request with full tool schema
+  /// Uses ephemeral context to avoid polluting session history
+  Future<LlmResponse> _retryWithFullSchema({
+    required String toolName,
+    required LlmResponse originalResponse,
+    required String userInput,
+    required Map<String, dynamic> parameters,
+    required LlmContext? context,
+    required bool enableTools,
+    required bool enablePlugins,
+    String? validationError,
+  }) async {
+    _logger.info('Retrying with full schema for tool: $toolName');
+
+    final fullSchema = _deferredToolManager!.getFullSchema(toolName);
+    if (fullSchema == null) {
+      throw Exception('Tool not found in registry: $toolName');
+    }
+
+    // Build retry message with full schema
+    final schemaInfo = '''
+The tool "$toolName" requires specific parameters. Here is the full schema:
+
+Tool: ${fullSchema['name']}
+Description: ${fullSchema['description']}
+Parameters: ${jsonEncode(fullSchema['inputSchema'])}
+
+${validationError != null ? 'Previous error: $validationError' : ''}
+
+Please call the tool again with the correct parameters.
+''';
+
+    // === EPHEMERAL CONTEXT (NOT POLLUTING SESSION HISTORY) ===
+    // Get current history WITHOUT adding retry message permanently
+    final currentHistory = chatSession.getMessagesForContext();
+
+    // Create ephemeral history with schema info
+    final ephemeralHistory = [
+      ...currentHistory,
+      LlmMessage(role: 'system', content: [LlmTextContent(text: schemaInfo)]),
+    ];
+
+    // Create new request with full schema available
+    final retryTools = <Map<String, dynamic>>[fullSchema];
+    final retryParams = Map<String, dynamic>.from(parameters);
+    retryParams['tools'] = retryTools;
+
+    final retryRequest = LlmRequest(
+      prompt: 'Please proceed with the tool call using the correct parameters.',
+      history: ephemeralHistory, // Ephemeral, not saved to session
+      parameters: retryParams,
+      context: context,
+    );
+
+    final retryResponse = await llmProvider.complete(retryRequest);
+
+    // If retry succeeds with tool calls, execute them
+    if (retryResponse.toolCalls != null && retryResponse.toolCalls!.isNotEmpty) {
+      return await _handleToolCalls(
+        retryResponse,
+        userInput,
+        enableTools,
+        enablePlugins,
+        parameters,
+        context,
+      );
+    }
+
+    return retryResponse;
+  }
+
   /// Collect available tools from MCP clients and plugins
   Future<List<Map<String, dynamic>>> _collectAvailableTools({
     bool enableMcpTools = true,
@@ -1043,19 +1194,37 @@ class LlmClient {
 
     // Get tools from MCP clients
     if (enableMcpTools && _mcpClientManager != null) {
-      try {
-        final mcpTools = await _mcpClientManager.getTools(mcpClientId);
-        for (var tool in mcpTools) {
-          try {
-            // Improved logging for clearer tool information display
-            _logger.debug('Tool information: ${jsonEncode(tool)}');
-          } catch (e) {
-            _logger.warning('Failed to serialize tool information: $e');
+      // === DEFERRED LOADING PATH (NEW) ===
+      if (_useDeferredLoading && _deferredToolManager != null) {
+        try {
+          // Lazy initialization on first use
+          if (!_deferredToolManager!.isInitialized) {
+            await _deferredToolManager!.initialize(_mcpClientManager);
           }
+          // Send only metadata to LLM context (token optimization)
+          final metadataTools = _deferredToolManager!.getMetadataForLlm();
+          tools.addAll(metadataTools);
+          _logger.debug('Using deferred loading: ${metadataTools.length} tool metadata loaded');
+        } catch (e) {
+          _logger.warning('Failed to get tools with deferred loading: $e');
         }
-        tools.addAll(mcpTools);
-      } catch (e) {
-        _logger.warning('Failed to get tools from MCP clients: $e');
+      }
+      // === EXISTING PATH (UNCHANGED) ===
+      else {
+        try {
+          final mcpTools = await _mcpClientManager.getTools(mcpClientId);
+          for (var tool in mcpTools) {
+            try {
+              // Improved logging for clearer tool information display
+              _logger.debug('Tool information: ${jsonEncode(tool)}');
+            } catch (e) {
+              _logger.warning('Failed to serialize tool information: $e');
+            }
+          }
+          tools.addAll(mcpTools);
+        } catch (e) {
+          _logger.warning('Failed to get tools from MCP clients: $e');
+        }
       }
     }
 
