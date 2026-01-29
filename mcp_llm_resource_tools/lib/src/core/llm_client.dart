@@ -833,8 +833,9 @@ class LlmClient {
             return;
           }
 
+          // Signal tool processing via metadata only (no text pollution)
           yield LlmResponseChunk(
-            textChunk: "\n\n[Processing tool calls...]\n\n",
+            textChunk: "",
             isDone: false,
             metadata: {'processing_tools': true},
           );
@@ -1040,11 +1041,28 @@ class LlmClient {
       final toolResultsInfo = toolResults.entries.map((entry) =>
       "Tool result for call ${entry.key}: ${entry.value}").join("\n");
 
+      // Collect tools for follow-up request (enables multi-round tool calling)
+      final availableTools = await _collectAvailableTools(
+        enableMcpTools: enableTools,
+        enablePlugins: enablePlugins,
+      );
+
+      // Build follow-up parameters with tools included
+      final followUpParameters = Map<String, dynamic>.from(parameters);
+      if (availableTools.isNotEmpty) {
+        final toolDescriptions = availableTools.map((tool) => {
+          'name': tool['name'],
+          'description': tool['description'],
+          'parameters': tool['inputSchema'],
+        }).toList();
+        followUpParameters['tools'] = toolDescriptions;
+      }
+
       // Create follow-up request
       final followUpRequest = LlmRequest(
         prompt: "Based on the tool results, answer the original question: \"$userInput\"\n\nTool results:\n$toolResultsInfo",
         history: chatSession.getMessagesForContext(),
-        parameters: parameters,
+        parameters: followUpParameters,
         context: context,
       );
 
