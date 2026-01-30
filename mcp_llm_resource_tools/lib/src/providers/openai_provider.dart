@@ -73,7 +73,7 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
       // Prepare API request
       final uri = Uri.parse(
-        '${baseUrl ?? 'https://api.openai.com'}/v1/chat/completions',
+        baseUrl ?? 'https://api.openai.com/v1/chat/completions',
       );
 
       // Set headers
@@ -119,7 +119,7 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
       // Prepare API request
       final uri = Uri.parse(
-        '${baseUrl ?? 'https://api.openai.com'}/v1/chat/completions',
+        baseUrl ?? 'https://api.openai.com/v1/chat/completions',
       );
 
       // Set headers
@@ -789,16 +789,17 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
         final toolCallContent = message.content;
         if (toolCallContent is Map &&
             toolCallContent.containsKey('tool_calls')) {
-          final toolCalls = (toolCallContent['tool_calls'] as List<dynamic>).map((toolCall) {
-            return {
-              'id': toolCall['id'],
-              'type': 'function',
-              'function': {
-                'name': toolCall['name'],
-                'arguments': toolCall['arguments'].toString(),
-              },
-            };
-          }).toList();
+          final toolCalls =
+              (toolCallContent['tool_calls'] as List<dynamic>).map((toolCall) {
+                return {
+                  'id': toolCall['id'],
+                  'type': 'function',
+                  'function': {
+                    'name': toolCall['name'],
+                    'arguments': toolCall['arguments'].toString(),
+                  },
+                };
+              }).toList();
 
           messages.add({
             'role': 'assistant',
