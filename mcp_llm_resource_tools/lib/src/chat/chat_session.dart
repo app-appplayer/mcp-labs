@@ -121,6 +121,7 @@ class ChatSession {
       toolName,
       resultContent,
       toolCallId: callId,
+      arguments: arguments,
     );
     addToolMessage(toolMessage);
 
