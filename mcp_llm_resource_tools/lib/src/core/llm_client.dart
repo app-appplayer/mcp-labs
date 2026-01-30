@@ -992,7 +992,7 @@ class LlmClient {
           'tool_calls': validToolCalls.map((tc) => {
             'id': tc.id ?? 'call_${DateTime.now().millisecondsSinceEpoch}',
             'name': tc.name,
-            'arguments': tc.arguments,
+            'arguments': jsonEncode(tc.arguments),
           }).toList(),
         },
         metadata: {'tool_call': true},

@@ -45,14 +45,18 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
           throw Exception('Max retry attempts reached: $e\n$stackTrace');
         }
 
-        logger.warning('Attempt $attempts failed, retrying in ${currentDelay.inMilliseconds}ms: $e');
+        logger.warning(
+          'Attempt $attempts failed, retrying in ${currentDelay.inMilliseconds}ms: $e',
+        );
         await Future.delayed(currentDelay);
 
         // Apply exponential backoff if enabled
         if (config.useExponentialBackoff) {
           currentDelay = Duration(
-            milliseconds: (currentDelay.inMilliseconds * 2)
-                .clamp(0, config.maxRetryDelay.inMilliseconds),
+            milliseconds: (currentDelay.inMilliseconds * 2).clamp(
+              0,
+              config.maxRetryDelay.inMilliseconds,
+            ),
           );
         }
       }
@@ -68,8 +72,10 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
       final requestBody = _buildRequestBody(request);
 
       // Prepare API request
-      final uri = Uri.parse('${baseUrl ?? 'https://api.openai.com'}/v1/chat/completions');
-      
+      final uri = Uri.parse(
+        baseUrl ?? 'https://api.openai.com/v1/chat/completions',
+      );
+
       // Set headers
       final headers = {
         'Content-Type': 'application/json',
@@ -85,13 +91,15 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
       // Handle response
       if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 300) {
-        final responseJson = jsonDecode(httpResponse.body) as Map<String, dynamic>;
+        final responseJson =
+            jsonDecode(httpResponse.body) as Map<String, dynamic>;
 
         // Parse response
         return _parseResponse(responseJson);
       } else {
         // Handle error
-        final error = 'OpenAI API Error: ${httpResponse.statusCode} - ${httpResponse.body}';
+        final error =
+            'OpenAI API Error: ${httpResponse.statusCode} - ${httpResponse.body}';
         logger.error(error);
 
         throw Exception(error);
@@ -110,8 +118,10 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
       logger.debug('OpenAI API request body structure created');
 
       // Prepare API request
-      final uri = Uri.parse('${baseUrl ?? 'https://api.openai.com'}/v1/chat/completions');
-      
+      final uri = Uri.parse(
+        baseUrl ?? 'https://api.openai.com/v1/chat/completions',
+      );
+
       // Set headers
       final headers = {
         'Content-Type': 'application/json',
@@ -119,18 +129,21 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
       };
 
       // Create streaming request
-      final httpRequest = http.Request('POST', uri)
-        ..headers.addAll(headers)
-        ..body = jsonEncode(requestBody);
+      final httpRequest =
+          http.Request('POST', uri)
+            ..headers.addAll(headers)
+            ..body = jsonEncode(requestBody);
 
       // Send request and get streaming response
       final streamedResponse = await executeWithRetry(() async {
         return await _client.send(httpRequest);
       });
 
-      if (streamedResponse.statusCode >= 200 && streamedResponse.statusCode < 300) {
+      if (streamedResponse.statusCode >= 200 &&
+          streamedResponse.statusCode < 300) {
         // Variables to track tool call information
-        final Map<String, Map<String, dynamic>> toolCallsMap = {}; // Variables to track tool call information
+        final Map<String, Map<String, dynamic>> toolCallsMap =
+            {}; // Variables to track tool call information
         List<LlmToolCall>? toolCalls;
         String currentToolCallId = '';
 
@@ -152,17 +165,34 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
           }
         }
 
-        // Process streaming response
+        // Buffer SSE by line: TCP may split a single "data: {...}\n" into multiple chunks;
+        // splitting chunks by \n directly yields incomplete JSON and causes jsonDecode to throw Unterminated string.
+        final StringBuffer lineBuffer = StringBuffer();
         await for (final chunk in utf8.decoder.bind(streamedResponse.stream)) {
-          // Parse SSE format
-          for (final line in chunk.split('\n')) {
+          lineBuffer.write(chunk);
+          final text = lineBuffer.toString();
+          final lastNewline = text.lastIndexOf('\n');
+          if (lastNewline == -1) {
+            // No complete line in current chunk, keep accumulating
+            continue;
+          }
+          final toProcess = text.substring(0, lastNewline);
+          lineBuffer.clear();
+          lineBuffer.write(text.substring(lastNewline + 1));
+
+          // Parse SSE format - only process complete lines
+          for (final line in toProcess.split('\n')) {
             if (line.startsWith('data: ') && line.length > 6) {
-              final data = line.substring(6);
+              final data = line.substring(6).trim();
+              if (data.isEmpty) continue;
               if (data == '[DONE]') {
                 // Streaming complete
                 if (toolCalls != null && toolCalls.isNotEmpty) {
                   // Check if required arguments are empty and apply default values if needed
-                  _validateAndFillToolCallArguments(toolCalls, toolDefinitionCache);
+                  _validateAndFillToolCallArguments(
+                    toolCalls,
+                    toolDefinitionCache,
+                  );
                 }
 
                 yield LlmResponseChunk(
@@ -186,7 +216,8 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
                   if (delta != null) {
                     // Process text content
-                    if (delta.containsKey('content') && delta['content'] != null) {
+                    if (delta.containsKey('content') &&
+                        delta['content'] != null) {
                       final content = delta['content'] as String;
                       responseText.write(content);
 
@@ -200,13 +231,16 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
                     // Process tool calls
                     if (delta.containsKey('tool_calls')) {
-                      final deltaToolCalls = delta['tool_calls'] as List<dynamic>?;
+                      final deltaToolCalls =
+                          delta['tool_calls'] as List<dynamic>?;
 
                       if (deltaToolCalls != null && deltaToolCalls.isNotEmpty) {
                         toolCalls ??= [];
 
                         for (final deltaToolCall in deltaToolCalls) {
-                          final function = deltaToolCall['function'] as Map<String, dynamic>?;
+                          final function =
+                              deltaToolCall['function']
+                                  as Map<String, dynamic>?;
 
                           // Process tool call ID
                           if (deltaToolCall.containsKey('id')) {
@@ -214,7 +248,8 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
                           }
 
                           // Process tool name
-                          if (function != null && function.containsKey('name')) {
+                          if (function != null &&
+                              function.containsKey('name')) {
                             final toolName = function['name'] as String;
 
                             // Create new tool call
@@ -225,13 +260,17 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
                               };
 
                               // Add to tool calls list
-                              final toolIndex = toolCalls.indexWhere((tc) => tc.id == currentToolCallId);
+                              final toolIndex = toolCalls.indexWhere(
+                                (tc) => tc.id == currentToolCallId,
+                              );
                               if (toolIndex == -1) {
-                                toolCalls.add(LlmToolCall(
-                                  id: currentToolCallId,
-                                  name: toolName,
-                                  arguments: <String, dynamic>{},
-                                ));
+                                toolCalls.add(
+                                  LlmToolCall(
+                                    id: currentToolCallId,
+                                    name: toolName,
+                                    arguments: <String, dynamic>{},
+                                  ),
+                                );
                               }
 
                               // Emit tool call start event
@@ -249,25 +288,35 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
                           }
 
                           // Process tool arguments
-                          if (function != null && function.containsKey('arguments')) {
+                          if (function != null &&
+                              function.containsKey('arguments')) {
                             final args = function['arguments'] as String;
 
                             if (toolCallsMap.containsKey(currentToolCallId)) {
                               // Accumulate argument string
-                              toolCallsMap[currentToolCallId]!['arguments'] += args;
-                              final argsStr = toolCallsMap[currentToolCallId]!['arguments'] as String;
+                              toolCallsMap[currentToolCallId]!['arguments'] +=
+                                  args;
+                              final argsStr =
+                                  toolCallsMap[currentToolCallId]!['arguments']
+                                      as String;
 
                               try {
                                 // Check if accumulated arguments form valid JSON and parse
                                 if (_isValidJson(argsStr)) {
-                                  final toolArgs = jsonDecode(argsStr) as Map<String, dynamic>;
+                                  final toolArgs =
+                                      jsonDecode(argsStr)
+                                          as Map<String, dynamic>;
 
                                   // Update tool call
-                                  final toolIndex = toolCalls.indexWhere((tc) => tc.id == currentToolCallId);
+                                  final toolIndex = toolCalls.indexWhere(
+                                    (tc) => tc.id == currentToolCallId,
+                                  );
                                   if (toolIndex >= 0) {
                                     toolCalls[toolIndex] = LlmToolCall(
                                       id: currentToolCallId,
-                                      name: toolCallsMap[currentToolCallId]!['name'] as String,
+                                      name:
+                                          toolCallsMap[currentToolCallId]!['name']
+                                              as String,
                                       arguments: toolArgs,
                                     );
                                   }
@@ -285,7 +334,9 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
                                 }
                               } catch (e) {
                                 // Incomplete JSON - continue accumulating
-                                logger.debug('Accumulating arguments for tool call: $currentToolCallId');
+                                logger.debug(
+                                  'Accumulating arguments for tool call: $currentToolCallId',
+                                );
                               }
                             }
                           }
@@ -305,10 +356,13 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
                         try {
                           if (argsStr.isNotEmpty) {
-                            final toolArgs = jsonDecode(argsStr) as Map<String, dynamic>;
+                            final toolArgs =
+                                jsonDecode(argsStr) as Map<String, dynamic>;
 
                             // Update tool calls list
-                            final toolIndex = toolCalls!.indexWhere((tc) => tc.id == toolId);
+                            final toolIndex = toolCalls!.indexWhere(
+                              (tc) => tc.id == toolId,
+                            );
                             if (toolIndex >= 0) {
                               toolCalls[toolIndex] = LlmToolCall(
                                 id: toolId,
@@ -324,7 +378,10 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
                       // Validate and fill tool call arguments
                       if (toolCalls != null) {
-                        _validateAndFillToolCallArguments(toolCalls, toolDefinitionCache);
+                        _validateAndFillToolCallArguments(
+                          toolCalls,
+                          toolDefinitionCache,
+                        );
                       }
 
                       // Emit final tool call event
@@ -349,14 +406,19 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
         }
       } else {
         // Handle error
-        final responseBody = await utf8.decoder.bind(streamedResponse.stream).join();
-        final error = 'OpenAI API Error: ${streamedResponse.statusCode} - $responseBody';
+        final responseBody =
+            await utf8.decoder.bind(streamedResponse.stream).join();
+        final error =
+            'OpenAI API Error: ${streamedResponse.statusCode} - $responseBody';
         logger.error(error);
 
         yield LlmResponseChunk(
           textChunk: 'Error: Unable to get a streaming response from OpenAI.',
           isDone: true,
-          metadata: {'error': error, 'status_code': streamedResponse.statusCode},
+          metadata: {
+            'error': error,
+            'status_code': streamedResponse.statusCode,
+          },
         );
       }
     } catch (e, stackTrace) {
@@ -381,8 +443,10 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
   }
 
   /// Validate and fill tool call arguments
-  void _validateAndFillToolCallArguments(List<LlmToolCall> toolCalls,
-      Map<String, Map<String, dynamic>> toolDefinitionCache) {
+  void _validateAndFillToolCallArguments(
+    List<LlmToolCall> toolCalls,
+    Map<String, Map<String, dynamic>> toolDefinitionCache,
+  ) {
     for (int i = 0; i < toolCalls.length; i++) {
       final toolCall = toolCalls[i];
       final toolName = toolCall.name;
@@ -395,9 +459,11 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
         if (inputSchema != null && inputSchema.containsKey('required')) {
           final required = inputSchema['required'] as List<dynamic>;
           final args = toolCall.arguments;
-          final propertyDefs = inputSchema.containsKey('properties') &&
-              inputSchema['properties'] is Map<String, dynamic> ?
-          inputSchema['properties'] as Map<String, dynamic> : {};
+          final propertyDefs =
+              inputSchema.containsKey('properties') &&
+                      inputSchema['properties'] is Map<String, dynamic>
+                  ? inputSchema['properties'] as Map<String, dynamic>
+                  : {};
 
           // Check for missing arguments
           bool needsUpdate = false;
@@ -447,7 +513,8 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
                         propertyDefs[argName].containsKey('enum') &&
                         propertyDefs[argName]['enum'] is List &&
                         (propertyDefs[argName]['enum'] as List).isNotEmpty) {
-                      defaultValue = (propertyDefs[argName]['enum'] as List).first;
+                      defaultValue =
+                          (propertyDefs[argName]['enum'] as List).first;
                     } else {
                       defaultValue = '';
                     }
@@ -476,13 +543,19 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
   @override
   bool hasToolCallMetadata(Map<String, dynamic> metadata) {
     // Check for OpenAI style metadata
-    if (metadata.containsKey('tool_call_start') && metadata['tool_call_start'] == true) {
-      logger.debug('Tool call metadata detected: OpenAI style (tool_call_start)');
+    if (metadata.containsKey('tool_call_start') &&
+        metadata['tool_call_start'] == true) {
+      logger.debug(
+        'Tool call metadata detected: OpenAI style (tool_call_start)',
+      );
       return true;
     }
 
-    if (metadata.containsKey('finish_reason') && metadata['finish_reason'] == 'tool_calls') {
-      logger.debug('Tool call metadata detected: OpenAI style (finish_reason=tool_calls)');
+    if (metadata.containsKey('finish_reason') &&
+        metadata['finish_reason'] == 'tool_calls') {
+      logger.debug(
+        'Tool call metadata detected: OpenAI style (finish_reason=tool_calls)',
+      );
       return true;
     }
 
@@ -503,11 +576,13 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
     logger.debug('Extracting tool call from OpenAI metadata');
 
     // Tool call start or update metadata
-    if ((metadata.containsKey('tool_call_start') || metadata.containsKey('tool_call_update')) &&
-        (metadata.containsKey('tool_name') || metadata.containsKey('tool_call_id'))) {
-
+    if ((metadata.containsKey('tool_call_start') ||
+            metadata.containsKey('tool_call_update')) &&
+        (metadata.containsKey('tool_name') ||
+            metadata.containsKey('tool_call_id'))) {
       final toolName = metadata['tool_name'] as String? ?? 'unknown_tool';
-      final toolId = metadata['tool_call_id'] as String? ??
+      final toolId =
+          metadata['tool_call_id'] as String? ??
           'openai_tool_${DateTime.now().millisecondsSinceEpoch}';
 
       // Extract arguments
@@ -519,26 +594,24 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
         arguments = metadata['tool_call_args'] as Map<String, dynamic>;
       }
 
-      logger.debug('Extracted OpenAI tool call: name=$toolName, id=$toolId, args=${jsonEncode(arguments)}');
-
-      return LlmToolCall(
-        id: toolId,
-        name: toolName,
-        arguments: arguments,
+      logger.debug(
+        'Extracted OpenAI tool call: name=$toolName, id=$toolId, args=${jsonEncode(arguments)}',
       );
+
+      return LlmToolCall(id: toolId, name: toolName, arguments: arguments);
     }
 
     // If there's a tool_calls array
     if (metadata.containsKey('tool_calls') &&
         metadata['tool_calls'] is List &&
         (metadata['tool_calls'] as List).isNotEmpty) {
-
       final toolCalls = metadata['tool_calls'] as List;
       final firstToolCall = toolCalls.first;
 
       if (firstToolCall is Map<String, dynamic>) {
         final toolName = firstToolCall['name'] as String? ?? 'unknown_tool';
-        final toolId = firstToolCall['id'] as String? ??
+        final toolId =
+            firstToolCall['id'] as String? ??
             'openai_tool_${DateTime.now().millisecondsSinceEpoch}';
 
         Map<String, dynamic> arguments = {};
@@ -548,24 +621,26 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
           // Parse if it's a JSON string
           if (firstToolCall['arguments'] is String) {
             try {
-              arguments = jsonDecode(firstToolCall['arguments'] as String) as Map<String, dynamic>;
+              arguments =
+                  jsonDecode(firstToolCall['arguments'] as String)
+                      as Map<String, dynamic>;
             } catch (e) {
               logger.warning('Failed to parse arguments JSON: $e');
             }
           }
           // Use as-is if it's already a Map
           else if (firstToolCall['arguments'] is Map) {
-            arguments = Map<String, dynamic>.from(firstToolCall['arguments'] as Map);
+            arguments = Map<String, dynamic>.from(
+              firstToolCall['arguments'] as Map,
+            );
           }
         }
 
-        logger.debug('Extracted OpenAI tool call from array: name=$toolName, id=$toolId, args=${jsonEncode(arguments)}');
-
-        return LlmToolCall(
-          id: toolId,
-          name: toolName,
-          arguments: arguments,
+        logger.debug(
+          'Extracted OpenAI tool call from array: name=$toolName, id=$toolId, args=${jsonEncode(arguments)}',
         );
+
+        return LlmToolCall(id: toolId, name: toolName, arguments: arguments);
       }
     }
 
@@ -578,19 +653,22 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
     final standardMetadata = Map<String, dynamic>.from(metadata);
 
     // Standardize tool call related fields
-    if (metadata.containsKey('finish_reason') && metadata['finish_reason'] == 'tool_calls') {
+    if (metadata.containsKey('finish_reason') &&
+        metadata['finish_reason'] == 'tool_calls') {
       if (!standardMetadata.containsKey('expects_tool_result')) {
         standardMetadata['expects_tool_result'] = true;
       }
     }
 
     // Convert tool_call_start to is_tool_call
-    if (metadata.containsKey('tool_call_start') && metadata['tool_call_start'] == true) {
+    if (metadata.containsKey('tool_call_start') &&
+        metadata['tool_call_start'] == true) {
       standardMetadata['is_tool_call'] = true;
     }
 
     // Convert tool_call_id to tool_id
-    if (metadata.containsKey('tool_call_id') && !standardMetadata.containsKey('tool_id')) {
+    if (metadata.containsKey('tool_call_id') &&
+        !standardMetadata.containsKey('tool_id')) {
       standardMetadata['tool_id'] = metadata['tool_call_id'];
     }
 
@@ -603,8 +681,10 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
       logger.debug('OpenAI embeddings request');
 
       // Prepare API request
-      final uri = Uri.parse('${baseUrl ?? 'https://api.openai.com'}/v1/embeddings');
-      
+      final uri = Uri.parse(
+        '${baseUrl ?? 'https://api.openai.com'}/v1/embeddings',
+      );
+
       // Set headers
       final headers = {
         'Content-Type': 'application/json',
@@ -612,10 +692,7 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
       };
 
       // Add request body
-      final requestBody = {
-        'input': text,
-        'model': 'text-embedding-3-large',
-      };
+      final requestBody = {'input': text, 'model': 'text-embedding-3-large'};
 
       // Send request
       final httpResponse = await _client.post(
@@ -626,7 +703,8 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
       // Handle response
       if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 300) {
-        final responseJson = jsonDecode(httpResponse.body) as Map<String, dynamic>;
+        final responseJson =
+            jsonDecode(httpResponse.body) as Map<String, dynamic>;
 
         final data = responseJson['data'] as List<dynamic>;
         if (data.isNotEmpty) {
@@ -637,7 +715,8 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
         }
       } else {
         // Handle error
-        final error = 'OpenAI API Error: ${httpResponse.statusCode} - ${httpResponse.body}';
+        final error =
+            'OpenAI API Error: ${httpResponse.statusCode} - ${httpResponse.body}';
         logger.error(error);
         throw Exception(error);
       }
@@ -664,7 +743,8 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
     // Check for system message in parameters
     if (request.parameters.containsKey('system') ||
         request.parameters.containsKey('system_instructions')) {
-      systemContent = request.parameters['system'] ??
+      systemContent =
+          request.parameters['system'] ??
           request.parameters['system_instructions'];
     }
 
@@ -703,14 +783,28 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
           'tool_call_id': toolCallId,
           'content': toolResult.toString(),
         });
-      } else if (message.role == 'assistant' && message.metadata.containsKey('tool_call')) {
+      } else if (message.role == 'assistant' &&
+          message.metadata.containsKey('tool_call')) {
         // Process assistant message with tool call
         final toolCallContent = message.content;
-        if (toolCallContent is Map && toolCallContent.containsKey('tool_calls')) {
+        if (toolCallContent is Map &&
+            toolCallContent.containsKey('tool_calls')) {
+          final toolCalls =
+              (toolCallContent['tool_calls'] as List<dynamic>).map((toolCall) {
+                return {
+                  'id': toolCall['id'],
+                  'type': 'function',
+                  'function': {
+                    'name': toolCall['name'],
+                    'arguments': toolCall['arguments'].toString(),
+                  },
+                };
+              }).toList();
+
           messages.add({
             'role': 'assistant',
-            'content': null,
-            'tool_calls': toolCallContent['tool_calls'],
+            'content': "",
+            'tool_calls': toolCalls,
           });
         } else {
           messages.add({
@@ -729,17 +823,11 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
 
     // Add system message if present
     if (systemContent != null && systemContent.isNotEmpty) {
-      messages.insert(0, {
-        'role': 'system',
-        'content': systemContent,
-      });
+      messages.insert(0, {'role': 'system', 'content': systemContent});
     }
 
     // Add current prompt
-    messages.add({
-      'role': 'user',
-      'content': request.prompt,
-    });
+    messages.add({'role': 'user', 'content': request.prompt});
 
     // Build request body
     final Map<String, dynamic> body = {
@@ -756,16 +844,17 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
     // Add tool configuration if provided
     if (request.parameters.containsKey('tools')) {
       final tools = request.parameters['tools'] as List<dynamic>;
-      body['tools'] = tools.map((tool) {
-        return {
-          'type': 'function',
-          'function': {
-            'name': tool['name'],
-            'description': tool['description'],
-            'parameters': tool['parameters'],
-          }
-        };
-      }).toList();
+      body['tools'] =
+          tools.map((tool) {
+            return {
+              'type': 'function',
+              'function': {
+                'name': tool['name'],
+                'description': tool['description'],
+                'parameters': tool['parameters'],
+              },
+            };
+          }).toList();
 
       // Enable tool calling
       if (request.parameters.containsKey('tool_choice')) {
@@ -791,10 +880,11 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
         return {
           'type': 'image_url',
           'image_url': {
-            'url': content['url'] ?? content['base64Data'] != null
-                ? 'data:${content['mimeType']};base64,${content['base64Data']}'
-                : '',
-          }
+            'url':
+                content['url'] ?? content['base64Data'] != null
+                    ? 'data:${content['mimeType']};base64,${content['base64Data']}'
+                    : '',
+          },
         };
       }
 
@@ -826,27 +916,26 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
     List<LlmToolCall>? toolCalls;
     final toolCallsList = message['tool_calls'] as List<dynamic>?;
     if (toolCallsList != null && toolCallsList.isNotEmpty) {
-      toolCalls = toolCallsList.map((toolCallData) {
-        // Parse tool call
-        final id = toolCallData['id'] as String;
-        final function = toolCallData['function'] as Map<String, dynamic>;
-        final name = function['name'] as String;
+      toolCalls =
+          toolCallsList.map((toolCallData) {
+            // Parse tool call
+            final id = toolCallData['id'] as String;
+            final function = toolCallData['function'] as Map<String, dynamic>;
+            final name = function['name'] as String;
 
-        // Parse arguments (comes as JSON string)
-        Map<String, dynamic> arguments;
-        try {
-          arguments = jsonDecode(function['arguments'] as String) as Map<String, dynamic>;
-        } catch (e) {
-          logger.warning('Error parsing tool arguments: $e');
-          arguments = {'_error': 'Failed to parse arguments'};
-        }
+            // Parse arguments (comes as JSON string)
+            Map<String, dynamic> arguments;
+            try {
+              arguments =
+                  jsonDecode(function['arguments'] as String)
+                      as Map<String, dynamic>;
+            } catch (e) {
+              logger.warning('Error parsing tool arguments: $e');
+              arguments = {'_error': 'Failed to parse arguments'};
+            }
 
-        return LlmToolCall(
-          id: id,
-          name: name,
-          arguments: arguments,
-        );
-      }).toList();
+            return LlmToolCall(id: id, name: name, arguments: arguments);
+          }).toList();
     }
 
     // Build metadata
@@ -865,11 +954,7 @@ class OpenAiProvider implements LlmInterface, RetryableLlmProvider {
       metadata['tool_call_ids'] = toolCalls.map((tc) => tc.id).toList();
     }
 
-    return LlmResponse(
-      text: text,
-      metadata: metadata,
-      toolCalls: toolCalls,
-    );
+    return LlmResponse(text: text, metadata: metadata, toolCalls: toolCalls);
   }
 }
 
